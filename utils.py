@@ -1,342 +1,129 @@
 import datetime
-import decimal
-import functools
-import logging
-import time
-import warnings
-from contextlib import contextmanager
-from hashlib import md5
+import re
+from collections import namedtuple
 
-from django.apps import apps
-from django.db import NotSupportedError
-from django.utils.dateparse import parse_time
+from django.db.models.fields.related import RECURSIVE_RELATIONSHIP_CONSTANT
 
-logger = logging.getLogger("django.db.backends")
+FieldReference = namedtuple("FieldReference", "to through")
+
+COMPILED_REGEX_TYPE = type(re.compile(""))
 
 
-class CursorWrapper:
-    def __init__(self, cursor, db):
-        self.cursor = cursor
-        self.db = db
+class RegexObject:
+    def __init__(self, obj):
+        self.pattern = obj.pattern
+        self.flags = obj.flags
 
-    WRAP_ERROR_ATTRS = frozenset(["fetchone", "fetchmany", "fetchall", "nextset"])
+    def __eq__(self, other):
+        if not isinstance(other, RegexObject):
+            return NotImplemented
+        return self.pattern == other.pattern and self.flags == other.flags
 
-    APPS_NOT_READY_WARNING_MSG = (
-        "Accessing the database during app initialization is discouraged. To fix this "
-        "warning, avoid executing queries in AppConfig.ready() or when your app "
-        "modules are imported."
-    )
 
-    def __getattr__(self, attr):
-        cursor_attr = getattr(self.cursor, attr)
-        if attr in CursorWrapper.WRAP_ERROR_ATTRS:
-            return self.db.wrap_database_errors(cursor_attr)
-        else:
-            return cursor_attr
+def get_migration_name_timestamp():
+    return datetime.datetime.now().strftime("%Y%m%d_%H%M")
 
-    def __iter__(self):
-        with self.db.wrap_database_errors:
-            yield from self.cursor
 
-    def __enter__(self):
-        return self
+def resolve_relation(model, app_label=None, model_name=None):
+    """
+    Turn a model class or model reference string and return a model tuple.
 
-    def __exit__(self, type, value, traceback):
-        # Close instead of passing through to avoid backend-specific behavior
-        # (#17671). Catch errors liberally because errors in cleanup code
-        # aren't useful.
-        try:
-            self.close()
-        except self.db.Database.Error:
-            pass
-
-    # The following methods cannot be implemented in __getattr__, because the
-    # code must run when the method is invoked, not just when it is accessed.
-
-    def callproc(self, procname, params=None, kparams=None):
-        # Keyword parameters for callproc aren't supported in PEP 249, but the
-        # database driver may support them (e.g. oracledb).
-        if kparams is not None and not self.db.features.supports_callproc_kwargs:
-            raise NotSupportedError(
-                "Keyword parameters for callproc are not supported on this "
-                "database backend."
+    app_label and model_name are used to resolve the scope of recursive and
+    unscoped model relationship.
+    """
+    if isinstance(model, str):
+        if model == RECURSIVE_RELATIONSHIP_CONSTANT:
+            if app_label is None or model_name is None:
+                raise TypeError(
+                    "app_label and model_name must be provided to resolve "
+                    "recursive relationships."
+                )
+            return app_label, model_name
+        if "." in model:
+            app_label, model_name = model.split(".", 1)
+            return app_label, model_name.lower()
+        if app_label is None:
+            raise TypeError(
+                "app_label must be provided to resolve unscoped model relationships."
             )
-        # Raise a warning during app initialization (stored_app_configs is only
-        # ever set during testing).
-        if not apps.ready and not apps.stored_app_configs:
-            warnings.warn(self.APPS_NOT_READY_WARNING_MSG, category=RuntimeWarning)
-        self.db.validate_no_broken_transaction()
-        with self.db.wrap_database_errors:
-            if params is None and kparams is None:
-                return self.cursor.callproc(procname)
-            elif kparams is None:
-                return self.cursor.callproc(procname, params)
-            else:
-                params = params or ()
-                return self.cursor.callproc(procname, params, kparams)
-
-    def execute(self, sql, params=None):
-        return self._execute_with_wrappers(
-            sql, params, many=False, executor=self._execute
-        )
-
-    def executemany(self, sql, param_list):
-        return self._execute_with_wrappers(
-            sql, param_list, many=True, executor=self._executemany
-        )
-
-    def _execute_with_wrappers(self, sql, params, many, executor):
-        context = {"connection": self.db, "cursor": self}
-        for wrapper in reversed(self.db.execute_wrappers):
-            executor = functools.partial(wrapper, executor)
-        return executor(sql, params, many, context)
-
-    def _execute(self, sql, params, *ignored_wrapper_args):
-        # Raise a warning during app initialization (stored_app_configs is only
-        # ever set during testing).
-        if not apps.ready and not apps.stored_app_configs:
-            warnings.warn(self.APPS_NOT_READY_WARNING_MSG, category=RuntimeWarning)
-        self.db.validate_no_broken_transaction()
-        with self.db.wrap_database_errors:
-            if params is None:
-                # params default might be backend specific.
-                return self.cursor.execute(sql)
-            else:
-                return self.cursor.execute(sql, params)
-
-    def _executemany(self, sql, param_list, *ignored_wrapper_args):
-        # Raise a warning during app initialization (stored_app_configs is only
-        # ever set during testing).
-        if not apps.ready and not apps.stored_app_configs:
-            warnings.warn(self.APPS_NOT_READY_WARNING_MSG, category=RuntimeWarning)
-        self.db.validate_no_broken_transaction()
-        with self.db.wrap_database_errors:
-            return self.cursor.executemany(sql, param_list)
+        return app_label, model.lower()
+    return model._meta.app_label, model._meta.model_name
 
 
-class CursorDebugWrapper(CursorWrapper):
-    # XXX callproc isn't instrumented at this time.
+def field_references(
+    model_tuple,
+    field,
+    reference_model_tuple,
+    reference_field_name=None,
+    reference_field=None,
+):
+    """
+    Return either False or a FieldReference if `field` references provided
+    context.
 
-    def execute(self, sql, params=None):
-        with self.debug_sql(sql, params, use_last_executed_query=True):
-            return super().execute(sql, params)
-
-    def executemany(self, sql, param_list):
-        with self.debug_sql(sql, param_list, many=True):
-            return super().executemany(sql, param_list)
-
-    @contextmanager
-    def debug_sql(
-        self, sql=None, params=None, use_last_executed_query=False, many=False
-    ):
-        start = time.monotonic()
-        try:
-            yield
-        finally:
-            stop = time.monotonic()
-            duration = stop - start
-            if use_last_executed_query:
-                sql = self.db.ops.last_executed_query(self.cursor, sql, params)
-            try:
-                times = len(params) if many else ""
-            except TypeError:
-                # params could be an iterator.
-                times = "?"
-            self.db.queries_log.append(
-                {
-                    "sql": "%s times: %s" % (times, sql) if many else sql,
-                    "time": "%.3f" % duration,
-                }
+    False positives can be returned if `reference_field_name` is provided
+    without `reference_field` because of the introspection limitation it
+    incurs. This should not be an issue when this function is used to determine
+    whether or not an optimization can take place.
+    """
+    remote_field = field.remote_field
+    if not remote_field:
+        return False
+    references_to = None
+    references_through = None
+    if resolve_relation(remote_field.model, *model_tuple) == reference_model_tuple:
+        to_fields = getattr(field, "to_fields", None)
+        if (
+            reference_field_name is None
+            or
+            # Unspecified to_field(s).
+            to_fields is None
+            or
+            # Reference to primary key.
+            (
+                None in to_fields
+                and (reference_field is None or reference_field.primary_key)
             )
-            logger.debug(
-                "(%.3f) %s; args=%s; alias=%s",
-                duration,
-                sql,
-                params,
-                self.db.alias,
-                extra={
-                    "duration": duration,
-                    "sql": sql,
-                    "params": params,
-                    "alias": self.db.alias,
-                },
+            or
+            # Reference to field.
+            reference_field_name in to_fields
+        ):
+            references_to = (remote_field, to_fields)
+    through = getattr(remote_field, "through", None)
+    if through and resolve_relation(through, *model_tuple) == reference_model_tuple:
+        through_fields = remote_field.through_fields
+        if (
+            reference_field_name is None
+            or
+            # Unspecified through_fields.
+            through_fields is None
+            or
+            # Reference to field.
+            reference_field_name in through_fields
+        ):
+            references_through = (remote_field, through_fields)
+    if not (references_to or references_through):
+        return False
+    return FieldReference(references_to, references_through)
+
+
+def get_references(state, model_tuple, field_tuple=()):
+    """
+    Generator of (model_state, name, field, reference) referencing
+    provided context.
+
+    If field_tuple is provided only references to this particular field of
+    model_tuple will be generated.
+    """
+    for state_model_tuple, model_state in state.models.items():
+        for name, field in model_state.fields.items():
+            reference = field_references(
+                state_model_tuple, field, model_tuple, *field_tuple
             )
+            if reference:
+                yield model_state, name, field, reference
 
 
-@contextmanager
-def debug_transaction(connection, sql):
-    start = time.monotonic()
-    try:
-        yield
-    finally:
-        if connection.queries_logged:
-            stop = time.monotonic()
-            duration = stop - start
-            connection.queries_log.append(
-                {
-                    "sql": "%s" % sql,
-                    "time": "%.3f" % duration,
-                }
-            )
-            logger.debug(
-                "(%.3f) %s; args=%s; alias=%s",
-                duration,
-                sql,
-                None,
-                connection.alias,
-                extra={
-                    "duration": duration,
-                    "sql": sql,
-                    "alias": connection.alias,
-                },
-            )
-
-
-def split_tzname_delta(tzname):
-    """
-    Split a time zone name into a 3-tuple of (name, sign, offset).
-    """
-    for sign in ["+", "-"]:
-        if sign in tzname:
-            name, offset = tzname.rsplit(sign, 1)
-            if offset and parse_time(offset):
-                if ":" not in offset:
-                    offset = f"{offset}:00"
-                return name, sign, offset
-    return tzname, None, None
-
-
-###############################################
-# Converters from database (string) to Python #
-###############################################
-
-
-def typecast_date(s):
-    return (
-        datetime.date(*map(int, s.split("-"))) if s else None
-    )  # return None if s is null
-
-
-def typecast_time(s):  # does NOT store time zone information
-    if not s:
-        return None
-    hour, minutes, seconds = s.split(":")
-    if "." in seconds:  # check whether seconds have a fractional part
-        seconds, microseconds = seconds.split(".")
-    else:
-        microseconds = "0"
-    return datetime.time(
-        int(hour), int(minutes), int(seconds), int((microseconds + "000000")[:6])
-    )
-
-
-def typecast_timestamp(s):  # does NOT store time zone information
-    # "2005-07-29 15:48:00.590358-05"
-    # "2005-07-29 09:56:00-05"
-    if not s:
-        return None
-    if " " not in s:
-        return typecast_date(s)
-    d, t = s.split()
-    # Remove timezone information.
-    if "-" in t:
-        t, _ = t.split("-", 1)
-    elif "+" in t:
-        t, _ = t.split("+", 1)
-    dates = d.split("-")
-    times = t.split(":")
-    seconds = times[2]
-    if "." in seconds:  # check whether seconds have a fractional part
-        seconds, microseconds = seconds.split(".")
-    else:
-        microseconds = "0"
-    return datetime.datetime(
-        int(dates[0]),
-        int(dates[1]),
-        int(dates[2]),
-        int(times[0]),
-        int(times[1]),
-        int(seconds),
-        int((microseconds + "000000")[:6]),
-    )
-
-
-###############################################
-# Converters from Python to database (string) #
-###############################################
-
-
-def split_identifier(identifier):
-    """
-    Split an SQL identifier into a two element tuple of (namespace, name).
-
-    The identifier could be a table, column, or sequence name might be prefixed
-    by a namespace.
-    """
-    try:
-        namespace, name = identifier.split('"."')
-    except ValueError:
-        namespace, name = "", identifier
-    return namespace.strip('"'), name.strip('"')
-
-
-def truncate_name(identifier, length=None, hash_len=4):
-    """
-    Shorten an SQL identifier to a repeatable mangled version with the given
-    length.
-
-    If a quote stripped name contains a namespace, e.g. USERNAME"."TABLE,
-    truncate the table portion only.
-    """
-    namespace, name = split_identifier(identifier)
-
-    if length is None or len(name) <= length:
-        return identifier
-
-    digest = names_digest(name, length=hash_len)
-    return "%s%s%s" % (
-        '%s"."' % namespace if namespace else "",
-        name[: length - hash_len],
-        digest,
-    )
-
-
-def names_digest(*args, length):
-    """
-    Generate a 32-bit digest of a set of arguments that can be used to shorten
-    identifying names.
-    """
-    h = md5(usedforsecurity=False)
-    for arg in args:
-        h.update(arg.encode())
-    return h.hexdigest()[:length]
-
-
-def format_number(value, max_digits, decimal_places):
-    """
-    Format a number into a string with the requisite number of digits and
-    decimal places.
-    """
-    if value is None:
-        return None
-    context = decimal.getcontext().copy()
-    if max_digits is not None:
-        context.prec = max_digits
-    if decimal_places is not None:
-        value = value.quantize(
-            decimal.Decimal(1).scaleb(-decimal_places), context=context
-        )
-    else:
-        context.traps[decimal.Rounded] = 1
-        value = context.create_decimal(value)
-    return "{:f}".format(value)
-
-
-def strip_quotes(table_name):
-    """
-    Strip quotes off of quoted table names to make them safe for use in index
-    names, sequence names, etc. For example '"USER"."TABLE"' (an Oracle naming
-    scheme) becomes 'USER"."TABLE'.
-    """
-    has_quotes = table_name.startswith('"') and table_name.endswith('"')
-    return table_name[1:-1] if has_quotes else table_name
+def field_is_referenced(state, model_tuple, field_tuple):
+    """Return whether `field_tuple` is referenced by any state models."""
+    return next(get_references(state, model_tuple, field_tuple), None) is not None
