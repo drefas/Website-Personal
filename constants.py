@@ -1,21 +1,13 @@
-DEBUG = 10
-INFO = 20
-SUCCESS = 25
-WARNING = 30
-ERROR = 40
+"""
+Constants used across the ORM in general.
+"""
 
-DEFAULT_TAGS = {
-    DEBUG: "debug",
-    INFO: "info",
-    SUCCESS: "success",
-    WARNING: "warning",
-    ERROR: "error",
-}
+from enum import Enum
 
-DEFAULT_LEVELS = {
-    "DEBUG": DEBUG,
-    "INFO": INFO,
-    "SUCCESS": SUCCESS,
-    "WARNING": WARNING,
-    "ERROR": ERROR,
-}
+# Separator used to split filter strings apart.
+LOOKUP_SEP = "__"
+
+
+class OnConflict(Enum):
+    IGNORE = "ignore"
+    UPDATE = "update"

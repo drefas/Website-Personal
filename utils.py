@@ -1,129 +1,278 @@
-import datetime
-import re
-from collections import namedtuple
+import pkgutil
+from importlib import import_module
 
-from django.db.models.fields.related import RECURSIVE_RELATIONSHIP_CONSTANT
+from django.conf import settings
+from django.core.exceptions import ImproperlyConfigured
 
-FieldReference = namedtuple("FieldReference", "to through")
+# For backwards compatibility with Django < 3.2
+from django.utils.connection import ConnectionDoesNotExist  # NOQA: F401
+from django.utils.connection import BaseConnectionHandler
+from django.utils.functional import cached_property
+from django.utils.module_loading import import_string
 
-COMPILED_REGEX_TYPE = type(re.compile(""))
-
-
-class RegexObject:
-    def __init__(self, obj):
-        self.pattern = obj.pattern
-        self.flags = obj.flags
-
-    def __eq__(self, other):
-        if not isinstance(other, RegexObject):
-            return NotImplemented
-        return self.pattern == other.pattern and self.flags == other.flags
+DEFAULT_DB_ALIAS = "default"
+DJANGO_VERSION_PICKLE_KEY = "_django_version"
 
 
-def get_migration_name_timestamp():
-    return datetime.datetime.now().strftime("%Y%m%d_%H%M")
+class Error(Exception):
+    pass
 
 
-def resolve_relation(model, app_label=None, model_name=None):
+class InterfaceError(Error):
+    pass
+
+
+class DatabaseError(Error):
+    pass
+
+
+class DataError(DatabaseError):
+    pass
+
+
+class OperationalError(DatabaseError):
+    pass
+
+
+class IntegrityError(DatabaseError):
+    pass
+
+
+class InternalError(DatabaseError):
+    pass
+
+
+class ProgrammingError(DatabaseError):
+    pass
+
+
+class NotSupportedError(DatabaseError):
+    pass
+
+
+class DatabaseErrorWrapper:
     """
-    Turn a model class or model reference string and return a model tuple.
-
-    app_label and model_name are used to resolve the scope of recursive and
-    unscoped model relationship.
+    Context manager and decorator that reraises backend-specific database
+    exceptions using Django's common wrappers.
     """
-    if isinstance(model, str):
-        if model == RECURSIVE_RELATIONSHIP_CONSTANT:
-            if app_label is None or model_name is None:
-                raise TypeError(
-                    "app_label and model_name must be provided to resolve "
-                    "recursive relationships."
-                )
-            return app_label, model_name
-        if "." in model:
-            app_label, model_name = model.split(".", 1)
-            return app_label, model_name.lower()
-        if app_label is None:
-            raise TypeError(
-                "app_label must be provided to resolve unscoped model relationships."
-            )
-        return app_label, model.lower()
-    return model._meta.app_label, model._meta.model_name
 
+    def __init__(self, wrapper):
+        """
+        wrapper is a database wrapper.
 
-def field_references(
-    model_tuple,
-    field,
-    reference_model_tuple,
-    reference_field_name=None,
-    reference_field=None,
-):
-    """
-    Return either False or a FieldReference if `field` references provided
-    context.
+        It must have a Database attribute defining PEP-249 exceptions.
+        """
+        self.wrapper = wrapper
 
-    False positives can be returned if `reference_field_name` is provided
-    without `reference_field` because of the introspection limitation it
-    incurs. This should not be an issue when this function is used to determine
-    whether or not an optimization can take place.
-    """
-    remote_field = field.remote_field
-    if not remote_field:
-        return False
-    references_to = None
-    references_through = None
-    if resolve_relation(remote_field.model, *model_tuple) == reference_model_tuple:
-        to_fields = getattr(field, "to_fields", None)
-        if (
-            reference_field_name is None
-            or
-            # Unspecified to_field(s).
-            to_fields is None
-            or
-            # Reference to primary key.
-            (
-                None in to_fields
-                and (reference_field is None or reference_field.primary_key)
-            )
-            or
-            # Reference to field.
-            reference_field_name in to_fields
+    def __enter__(self):
+        pass
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if exc_type is None:
+            return
+        for dj_exc_type in (
+            DataError,
+            OperationalError,
+            IntegrityError,
+            InternalError,
+            ProgrammingError,
+            NotSupportedError,
+            DatabaseError,
+            InterfaceError,
+            Error,
         ):
-            references_to = (remote_field, to_fields)
-    through = getattr(remote_field, "through", None)
-    if through and resolve_relation(through, *model_tuple) == reference_model_tuple:
-        through_fields = remote_field.through_fields
-        if (
-            reference_field_name is None
-            or
-            # Unspecified through_fields.
-            through_fields is None
-            or
-            # Reference to field.
-            reference_field_name in through_fields
-        ):
-            references_through = (remote_field, through_fields)
-    if not (references_to or references_through):
-        return False
-    return FieldReference(references_to, references_through)
+            db_exc_type = getattr(self.wrapper.Database, dj_exc_type.__name__)
+            if issubclass(exc_type, db_exc_type):
+                dj_exc_value = dj_exc_type(*exc_value.args)
+                # Only set the 'errors_occurred' flag for errors that may make
+                # the connection unusable.
+                if dj_exc_type not in (DataError, IntegrityError):
+                    self.wrapper.errors_occurred = True
+                raise dj_exc_value.with_traceback(traceback) from exc_value
+
+    def __call__(self, func):
+        # Note that we are intentionally not using @wraps here for performance
+        # reasons. Refs #21109.
+        def inner(*args, **kwargs):
+            with self:
+                return func(*args, **kwargs)
+
+        return inner
 
 
-def get_references(state, model_tuple, field_tuple=()):
+def load_backend(backend_name):
     """
-    Generator of (model_state, name, field, reference) referencing
-    provided context.
-
-    If field_tuple is provided only references to this particular field of
-    model_tuple will be generated.
+    Return a database backend's "base" module given a fully qualified database
+    backend name, or raise an error if it doesn't exist.
     """
-    for state_model_tuple, model_state in state.models.items():
-        for name, field in model_state.fields.items():
-            reference = field_references(
-                state_model_tuple, field, model_tuple, *field_tuple
+    # This backend was renamed in Django 1.9.
+    if backend_name == "django.db.backends.postgresql_psycopg2":
+        backend_name = "django.db.backends.postgresql"
+
+    try:
+        return import_module("%s.base" % backend_name)
+    except ImportError as e_user:
+        # The database backend wasn't found. Display a helpful error message
+        # listing all built-in database backends.
+        import django.db.backends
+
+        builtin_backends = [
+            name
+            for _, name, ispkg in pkgutil.iter_modules(django.db.backends.__path__)
+            if ispkg and name not in {"base", "dummy"}
+        ]
+        if backend_name not in ["django.db.backends.%s" % b for b in builtin_backends]:
+            backend_reprs = map(repr, sorted(builtin_backends))
+            raise ImproperlyConfigured(
+                "%r isn't an available database backend or couldn't be "
+                "imported. Check the above exception. To use one of the "
+                "built-in backends, use 'django.db.backends.XXX', where XXX "
+                "is one of:\n"
+                "    %s" % (backend_name, ", ".join(backend_reprs))
+            ) from e_user
+        else:
+            # If there's some other error, this must be an error in Django
+            raise
+
+
+class ConnectionHandler(BaseConnectionHandler):
+    settings_name = "DATABASES"
+    # Connections needs to still be an actual thread local, as it's truly
+    # thread-critical. Database backends should use @async_unsafe to protect
+    # their code from async contexts, but this will give those contexts
+    # separate connections in case it's needed as well. There's no cleanup
+    # after async contexts, though, so we don't allow that if we can help it.
+    thread_critical = True
+
+    def configure_settings(self, databases):
+        databases = super().configure_settings(databases)
+        if databases == {}:
+            databases[DEFAULT_DB_ALIAS] = {"ENGINE": "django.db.backends.dummy"}
+        elif DEFAULT_DB_ALIAS not in databases:
+            raise ImproperlyConfigured(
+                f"You must define a '{DEFAULT_DB_ALIAS}' database."
             )
-            if reference:
-                yield model_state, name, field, reference
+        elif databases[DEFAULT_DB_ALIAS] == {}:
+            databases[DEFAULT_DB_ALIAS]["ENGINE"] = "django.db.backends.dummy"
+
+        # Configure default settings.
+        for conn in databases.values():
+            conn.setdefault("ATOMIC_REQUESTS", False)
+            conn.setdefault("AUTOCOMMIT", True)
+            conn.setdefault("ENGINE", "django.db.backends.dummy")
+            if conn["ENGINE"] == "django.db.backends." or not conn["ENGINE"]:
+                conn["ENGINE"] = "django.db.backends.dummy"
+            conn.setdefault("CONN_MAX_AGE", 0)
+            conn.setdefault("CONN_HEALTH_CHECKS", False)
+            conn.setdefault("OPTIONS", {})
+            conn.setdefault("TIME_ZONE", None)
+            for setting in ["NAME", "USER", "PASSWORD", "HOST", "PORT"]:
+                conn.setdefault(setting, "")
+
+            test_settings = conn.setdefault("TEST", {})
+            default_test_settings = [
+                ("CHARSET", None),
+                ("COLLATION", None),
+                ("MIGRATE", True),
+                ("MIRROR", None),
+                ("NAME", None),
+            ]
+            for key, value in default_test_settings:
+                test_settings.setdefault(key, value)
+        return databases
+
+    @property
+    def databases(self):
+        # Maintained for backward compatibility as some 3rd party packages have
+        # made use of this private API in the past. It is no longer used within
+        # Django itself.
+        return self.settings
+
+    def create_connection(self, alias):
+        db = self.settings[alias]
+        backend = load_backend(db["ENGINE"])
+        return backend.DatabaseWrapper(db, alias)
 
 
-def field_is_referenced(state, model_tuple, field_tuple):
-    """Return whether `field_tuple` is referenced by any state models."""
-    return next(get_references(state, model_tuple, field_tuple), None) is not None
+class ConnectionRouter:
+    def __init__(self, routers=None):
+        """
+        If routers is not specified, default to settings.DATABASE_ROUTERS.
+        """
+        self._routers = routers
+
+    @cached_property
+    def routers(self):
+        if self._routers is None:
+            self._routers = settings.DATABASE_ROUTERS
+        routers = []
+        for r in self._routers:
+            if isinstance(r, str):
+                router = import_string(r)()
+            else:
+                router = r
+            routers.append(router)
+        return routers
+
+    def _router_func(action):
+        def _route_db(self, model, **hints):
+            chosen_db = None
+            for router in self.routers:
+                try:
+                    method = getattr(router, action)
+                except AttributeError:
+                    # If the router doesn't have a method, skip to the next one.
+                    pass
+                else:
+                    chosen_db = method(model, **hints)
+                    if chosen_db:
+                        return chosen_db
+            instance = hints.get("instance")
+            if instance is not None and instance._state.db:
+                return instance._state.db
+            return DEFAULT_DB_ALIAS
+
+        return _route_db
+
+    db_for_read = _router_func("db_for_read")
+    db_for_write = _router_func("db_for_write")
+
+    def allow_relation(self, obj1, obj2, **hints):
+        for router in self.routers:
+            try:
+                method = router.allow_relation
+            except AttributeError:
+                # If the router doesn't have a method, skip to the next one.
+                pass
+            else:
+                allow = method(obj1, obj2, **hints)
+                if allow is not None:
+                    return allow
+        return obj1._state.db == obj2._state.db
+
+    def allow_migrate(self, db, app_label, **hints):
+        for router in self.routers:
+            try:
+                method = router.allow_migrate
+            except AttributeError:
+                # If the router doesn't have a method, skip to the next one.
+                continue
+
+            allow = method(db, app_label, **hints)
+
+            if allow is not None:
+                return allow
+        return True
+
+    def allow_migrate_model(self, db, model):
+        return self.allow_migrate(
+            db,
+            model._meta.app_label,
+            model_name=model._meta.model_name,
+            model=model,
+        )
+
+    def get_migratable_models(self, app_config, db, include_auto_created=False):
+        """Return app models allowed to be migrated on provided db."""
+        models = app_config.get_models(include_auto_created=include_auto_created)
+        return [model for model in models if self.allow_migrate_model(db, model)]
