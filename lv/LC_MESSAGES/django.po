@@ -1,18 +1,16 @@
 # This file is distributed under the same license as the Django package.
 #
 # Translators:
-# Edgars Voroboks <edgars.voroboks@gmail.com>, 2023
-# Edgars Voroboks <edgars.voroboks@gmail.com>, 2017
-# Edgars Voroboks <edgars.voroboks@gmail.com>, 2018
-# Edgars Voroboks <edgars.voroboks@gmail.com>, 2019
-# peterisb <pb@sungis.lv>, 2016-2017
+# Jannis Leidel <jannis@leidel.info>, 2011
+# NullIsNot0 <nullisnot0@inbox.lv>, 2019,2021
+# peterisb <pb@sungis.lv>, 2016
 msgid ""
 msgstr ""
 "Project-Id-Version: django\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2023-01-17 02:13-0600\n"
-"PO-Revision-Date: 2023-04-19 09:22+0000\n"
-"Last-Translator: Edgars Voroboks <edgars.voroboks@gmail.com>, 2023\n"
+"POT-Creation-Date: 2021-01-15 09:00+0100\n"
+"PO-Revision-Date: 2021-01-25 22:49+0000\n"
+"Last-Translator: NullIsNot0 <nullisnot0@inbox.lv>\n"
 "Language-Team: Latvian (http://www.transifex.com/django/django/language/"
 "lv/)\n"
 "MIME-Version: 1.0\n"
@@ -22,97 +20,34 @@ msgstr ""
 "Plural-Forms: nplurals=3; plural=(n%10==1 && n%100!=11 ? 0 : n != 0 ? 1 : "
 "2);\n"
 
-msgid "PostgreSQL extensions"
-msgstr "PostgreSQL paplašinājums"
+msgid "Redirects"
+msgstr "Pārvirzīšanas"
 
-#, python-format
-msgid "Item %(nth)s in the array did not validate:"
-msgstr "Masīva %(nth)s elements nav pareizs:"
+msgid "site"
+msgstr "vietne"
 
-msgid "Nested arrays must have the same length."
-msgstr "Iekļauto masīvu garumam jābūt vienādam."
+msgid "redirect from"
+msgstr "pārvirzīt(redirect) no"
 
-msgid "Map of strings to strings/nulls"
-msgstr "Virkņu karte uz virknēm/tukšumiem"
-
-#, python-format
-msgid "The value of “%(key)s” is not a string or null."
-msgstr "\"%(key)s\" vērtība nav teksta rinda vai nulles simbols."
-
-msgid "Could not load JSON data."
-msgstr "Nevarēja ielādēt JSON datus."
-
-msgid "Input must be a JSON dictionary."
-msgstr "Ieejošajiem datiem ir jābūt JSON vārdnīcai."
-
-msgid "Enter two valid values."
-msgstr "Ievadi divas derīgas vērtības."
-
-msgid "The start of the range must not exceed the end of the range."
-msgstr "Diapazona sākums nedrīkst būt liekāks par beigām."
-
-msgid "Enter two whole numbers."
-msgstr "Ievadiet divus veselus skaitļus."
-
-msgid "Enter two numbers."
-msgstr "Ievadiet divus skaitļus."
-
-msgid "Enter two valid date/times."
-msgstr "Ievadiet divus derīgus datumus/laikus."
-
-msgid "Enter two valid dates."
-msgstr "Ievadiet divus korektus datumus."
-
-#, python-format
 msgid ""
-"List contains %(show_value)d item, it should contain no more than "
-"%(limit_value)d."
-msgid_plural ""
-"List contains %(show_value)d items, it should contain no more than "
-"%(limit_value)d."
-msgstr[0] ""
-"Saraksts satur %(show_value)d ierakstus, bet tam jāsatur ne vairāk kā "
-"%(limit_value)d."
-msgstr[1] ""
-"Saraksts satur %(show_value)d ierakstu, bet tam jāsatur ne vairāk kā "
-"%(limit_value)d."
-msgstr[2] ""
-"Saraksts satur %(show_value)d ierakstus, bet tam jāsatur ne vairāk kā "
-"%(limit_value)d."
-
-#, python-format
-msgid ""
-"List contains %(show_value)d item, it should contain no fewer than "
-"%(limit_value)d."
-msgid_plural ""
-"List contains %(show_value)d items, it should contain no fewer than "
-"%(limit_value)d."
-msgstr[0] ""
-"Saraksts satur %(show_value)d ierakstus, bet tam jāsatur vismaz "
-"%(limit_value)d."
-msgstr[1] ""
-"Saraksts satur %(show_value)d ierakstu, bet tam jāsatur vismaz "
-"%(limit_value)d."
-msgstr[2] ""
-"Saraksts satur %(show_value)d ierakstus, bet tam jāsatur vismaz "
-"%(limit_value)d."
-
-#, python-format
-msgid "Some keys were missing: %(keys)s"
-msgstr "Trūka dažas atslēgas: %(keys)s"
-
-#, python-format
-msgid "Some unknown keys were provided: %(keys)s"
-msgstr "Tika norādītas dažas nezināmas atslēgas: %(keys)s"
-
-#, python-format
-msgid ""
-"Ensure that the upper bound of the range is not greater than %(limit_value)s."
+"This should be an absolute path, excluding the domain name. Example: “/"
+"events/search/”."
 msgstr ""
-"Pārliecinieties, ka diapazona augšējā robeža nav lielāka par %(limit_value)s."
+"Tam jābūt absolūtajam ceļam, atskaitot domēna vārdu. Piemēram: \"/notikumi/"
+"meklet/\"."
 
-#, python-format
+msgid "redirect to"
+msgstr "pārvirzīt(redirect) uz"
+
 msgid ""
-"Ensure that the lower bound of the range is not less than %(limit_value)s."
+"This can be either an absolute path (as above) or a full URL starting with a "
+"scheme such as “https://”."
 msgstr ""
-"Pārliecinieties, ka diapazona apakšējā robeža nav mazāka par %(limit_value)s."
+"Šis var būt vai nu absolūtais ceļš (kā augstāk), vai pilnais URL, kas sākas "
+"ar \"https://\"."
+
+msgid "redirect"
+msgstr "pārvirzīt"
+
+msgid "redirects"
+msgstr "pārvirzījumi"
