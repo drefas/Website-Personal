@@ -1,174 +1,124 @@
-# This file is dual licensed under the terms of the Apache License, Version
-# 2.0, and the BSD License. See the LICENSE file in the root of this repository
-# for complete details.
+#
+# Copyright (C) 2009-2020 the sqlparse authors and contributors
+# <see AUTHORS file>
+#
+# This module is part of python-sqlparse and is released under
+# the BSD License: https://opensource.org/licenses/BSD-3-Clause
 
-from __future__ import annotations
-
+import itertools
 import re
-from typing import NewType, Tuple, Union, cast
+from collections import deque
+from contextlib import contextmanager
 
-from .tags import Tag, parse_tag
-from .version import InvalidVersion, Version
-
-BuildTag = Union[Tuple[()], Tuple[int, str]]
-NormalizedName = NewType("NormalizedName", str)
-
-
-class InvalidName(ValueError):
-    """
-    An invalid distribution name; users should refer to the packaging user guide.
-    """
-
-
-class InvalidWheelFilename(ValueError):
-    """
-    An invalid wheel filename was found, users should refer to PEP 427.
-    """
-
-
-class InvalidSdistFilename(ValueError):
-    """
-    An invalid sdist filename was found, users should refer to the packaging user guide.
-    """
-
-
-# Core metadata spec for `Name`
-_validate_regex = re.compile(
-    r"^([A-Z0-9]|[A-Z0-9][A-Z0-9._-]*[A-Z0-9])$", re.IGNORECASE
+# This regular expression replaces the home-cooked parser that was here before.
+# It is much faster, but requires an extra post-processing step to get the
+# desired results (that are compatible with what you would expect from the
+# str.splitlines() method).
+#
+# It matches groups of characters: newlines, quoted strings, or unquoted text,
+# and splits on that basis. The post-processing step puts those back together
+# into the actual lines of SQL.
+SPLIT_REGEX = re.compile(r"""
+(
+ (?:                     # Start of non-capturing group
+  (?:\r\n|\r|\n)      |  # Match any single newline, or
+  [^\r\n'"]+          |  # Match any character series without quotes or
+                         # newlines, or
+  "(?:[^"\\]|\\.)*"   |  # Match double-quoted strings, or
+  '(?:[^'\\]|\\.)*'      # Match single quoted strings
+ )
 )
-_canonicalize_regex = re.compile(r"[-_.]+")
-_normalized_regex = re.compile(r"^([a-z0-9]|[a-z0-9]([a-z0-9-](?!--))*[a-z0-9])$")
-# PEP 427: The build number must start with a digit.
-_build_tag_regex = re.compile(r"(\d+)(.*)")
+""", re.VERBOSE)
+
+LINE_MATCH = re.compile(r'(\r\n|\r|\n)')
 
 
-def canonicalize_name(name: str, *, validate: bool = False) -> NormalizedName:
-    if validate and not _validate_regex.match(name):
-        raise InvalidName(f"name is invalid: {name!r}")
-    # This is taken from PEP 503.
-    value = _canonicalize_regex.sub("-", name).lower()
-    return cast(NormalizedName, value)
+def split_unquoted_newlines(stmt):
+    """Split a string on all unquoted newlines.
+
+    Unlike str.splitlines(), this will ignore CR/LF/CR+LF if the requisite
+    character is inside of a string."""
+    text = str(stmt)
+    lines = SPLIT_REGEX.split(text)
+    outputlines = ['']
+    for line in lines:
+        if not line:
+            continue
+        elif LINE_MATCH.match(line):
+            outputlines.append('')
+        else:
+            outputlines[-1] += line
+    return outputlines
 
 
-def is_normalized_name(name: str) -> bool:
-    return _normalized_regex.match(name) is not None
+def remove_quotes(val):
+    """Helper that removes surrounding quotes from strings."""
+    if val is None:
+        return
+    if val[0] in ('"', "'", '`') and val[0] == val[-1]:
+        val = val[1:-1]
+    return val
 
 
-def canonicalize_version(
-    version: Version | str, *, strip_trailing_zero: bool = True
-) -> str:
+def recurse(*cls):
+    """Function decorator to help with recursion
+
+    :param cls: Classes to not recurse over
+    :return: function
     """
-    This is very similar to Version.__str__, but has one subtle difference
-    with the way it handles the release segment.
+    def wrap(f):
+        def wrapped_f(tlist):
+            for sgroup in tlist.get_sublists():
+                if not isinstance(sgroup, cls):
+                    wrapped_f(sgroup)
+            f(tlist)
+
+        return wrapped_f
+
+    return wrap
+
+
+def imt(token, i=None, m=None, t=None):
+    """Helper function to simplify comparisons Instance, Match and TokenType
+    :param token:
+    :param i: Class or Tuple/List of Classes
+    :param m: Tuple of TokenType & Value. Can be list of Tuple for multiple
+    :param t: TokenType or Tuple/List of TokenTypes
+    :return:  bool
     """
-    if isinstance(version, str):
-        try:
-            parsed = Version(version)
-        except InvalidVersion:
-            # Legacy versions cannot be normalized
-            return version
-    else:
-        parsed = version
-
-    parts = []
-
-    # Epoch
-    if parsed.epoch != 0:
-        parts.append(f"{parsed.epoch}!")
-
-    # Release segment
-    release_segment = ".".join(str(x) for x in parsed.release)
-    if strip_trailing_zero:
-        # NB: This strips trailing '.0's to normalize
-        release_segment = re.sub(r"(\.0)+$", "", release_segment)
-    parts.append(release_segment)
-
-    # Pre-release
-    if parsed.pre is not None:
-        parts.append("".join(str(x) for x in parsed.pre))
-
-    # Post-release
-    if parsed.post is not None:
-        parts.append(f".post{parsed.post}")
-
-    # Development release
-    if parsed.dev is not None:
-        parts.append(f".dev{parsed.dev}")
-
-    # Local version segment
-    if parsed.local is not None:
-        parts.append(f"+{parsed.local}")
-
-    return "".join(parts)
+    if token is None:
+        return False
+    if i and isinstance(token, i):
+        return True
+    if m:
+        if isinstance(m, list):
+            if any(token.match(*pattern) for pattern in m):
+                return True
+        elif token.match(*m):
+            return True
+    if t:
+        if isinstance(t, list):
+            if any(token.ttype in ttype for ttype in t):
+                return True
+        elif token.ttype in t:
+            return True
+    return False
 
 
-def parse_wheel_filename(
-    filename: str,
-) -> tuple[NormalizedName, Version, BuildTag, frozenset[Tag]]:
-    if not filename.endswith(".whl"):
-        raise InvalidWheelFilename(
-            f"Invalid wheel filename (extension must be '.whl'): {filename}"
-        )
-
-    filename = filename[:-4]
-    dashes = filename.count("-")
-    if dashes not in (4, 5):
-        raise InvalidWheelFilename(
-            f"Invalid wheel filename (wrong number of parts): {filename}"
-        )
-
-    parts = filename.split("-", dashes - 2)
-    name_part = parts[0]
-    # See PEP 427 for the rules on escaping the project name.
-    if "__" in name_part or re.match(r"^[\w\d._]*$", name_part, re.UNICODE) is None:
-        raise InvalidWheelFilename(f"Invalid project name: {filename}")
-    name = canonicalize_name(name_part)
-
-    try:
-        version = Version(parts[1])
-    except InvalidVersion as e:
-        raise InvalidWheelFilename(
-            f"Invalid wheel filename (invalid version): {filename}"
-        ) from e
-
-    if dashes == 5:
-        build_part = parts[2]
-        build_match = _build_tag_regex.match(build_part)
-        if build_match is None:
-            raise InvalidWheelFilename(
-                f"Invalid build number: {build_part} in '{filename}'"
-            )
-        build = cast(BuildTag, (int(build_match.group(1)), build_match.group(2)))
-    else:
-        build = ()
-    tags = parse_tag(parts[-1])
-    return (name, version, build, tags)
+def consume(iterator, n):
+    """Advance the iterator n-steps ahead. If n is none, consume entirely."""
+    deque(itertools.islice(iterator, n), maxlen=0)
 
 
-def parse_sdist_filename(filename: str) -> tuple[NormalizedName, Version]:
-    if filename.endswith(".tar.gz"):
-        file_stem = filename[: -len(".tar.gz")]
-    elif filename.endswith(".zip"):
-        file_stem = filename[: -len(".zip")]
-    else:
-        raise InvalidSdistFilename(
-            f"Invalid sdist filename (extension must be '.tar.gz' or '.zip'):"
-            f" {filename}"
-        )
+@contextmanager
+def offset(filter_, n=0):
+    filter_.offset += n
+    yield
+    filter_.offset -= n
 
-    # We are requiring a PEP 440 version, which cannot contain dashes,
-    # so we split on the last dash.
-    name_part, sep, version_part = file_stem.rpartition("-")
-    if not sep:
-        raise InvalidSdistFilename(f"Invalid sdist filename: {filename}")
 
-    name = canonicalize_name(name_part)
-
-    try:
-        version = Version(version_part)
-    except InvalidVersion as e:
-        raise InvalidSdistFilename(
-            f"Invalid sdist filename (invalid version): {filename}"
-        ) from e
-
-    return (name, version)
+@contextmanager
+def indent(filter_, n=1):
+    filter_.indent += n
+    yield
+    filter_.indent -= n

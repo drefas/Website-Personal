@@ -1,2 +1,3 @@
 [console_scripts]
-django-admin = django.core.management:execute_from_command_line
+pip = pip._internal.cli.main:main
+pip3 = pip._internal.cli.main:main
