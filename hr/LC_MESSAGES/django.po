@@ -19,20 +19,20 @@ msgstr ""
 "Plural-Forms: nplurals=3; plural=n%10==1 && n%100!=11 ? 0 : n%10>=2 && n"
 "%10<=4 && (n%100<10 || n%100>=20) ? 1 : 2;\n"
 
-msgid "Sessions"
-msgstr "Sessions"
+msgid "Sites"
+msgstr "Stranice"
 
-msgid "session key"
-msgstr "session ključ (key)"
+msgid "The domain name cannot contain any spaces or tabs."
+msgstr "Naziv domene ne može sadržavati razmake ili tabove."
 
-msgid "session data"
-msgstr "session podaci"
+msgid "domain name"
+msgstr "ime domene"
 
-msgid "expire date"
-msgstr "ističe na datum"
+msgid "display name"
+msgstr "ime za prikaz"
 
-msgid "session"
-msgstr "session"
+msgid "site"
+msgstr "stranica"
 
-msgid "sessions"
-msgstr "sessions"
+msgid "sites"
+msgstr "stranice"

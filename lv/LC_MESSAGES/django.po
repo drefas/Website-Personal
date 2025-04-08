@@ -1,6 +1,7 @@
 # This file is distributed under the same license as the Django package.
 #
 # Translators:
+# edgars <edgars.jekabsons@gmail.com>, 2011
 # Jannis Leidel <jannis@leidel.info>, 2011
 # peterisb <pb@sungis.lv>, 2016
 msgid ""
@@ -19,20 +20,20 @@ msgstr ""
 "Plural-Forms: nplurals=3; plural=(n%10==1 && n%100!=11 ? 0 : n != 0 ? 1 : "
 "2);\n"
 
-msgid "Sessions"
-msgstr "Sesijas"
+msgid "Sites"
+msgstr "Vietnes"
 
-msgid "session key"
-msgstr "sesijas atslēga"
+msgid "The domain name cannot contain any spaces or tabs."
+msgstr "Domēna nosaukumā nevar būt tukšumi vai tabulatori."
 
-msgid "session data"
-msgstr "sesijas dati"
+msgid "domain name"
+msgstr "domēna vārds"
 
-msgid "expire date"
-msgstr "izbeigšanās datums"
+msgid "display name"
+msgstr "attēlojamais vārds"
 
-msgid "session"
-msgstr "sesija"
+msgid "site"
+msgstr "vietne"
 
-msgid "sessions"
-msgstr "sesijas"
+msgid "sites"
+msgstr "vietnes"
