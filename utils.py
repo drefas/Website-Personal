@@ -1,111 +1,66 @@
 import functools
-from collections import Counter
-from pathlib import Path
+from importlib import import_module
 
-from django.apps import apps
-from django.conf import settings
-from django.core.exceptions import ImproperlyConfigured
-from django.utils.functional import cached_property
-from django.utils.module_loading import import_string
+from django.core.exceptions import ViewDoesNotExist
+from django.utils.module_loading import module_has_submodule
 
 
-class InvalidTemplateEngineError(ImproperlyConfigured):
-    pass
+@functools.cache
+def get_callable(lookup_view):
+    """
+    Return a callable corresponding to lookup_view.
+    * If lookup_view is already a callable, return it.
+    * If lookup_view is a string import path that can be resolved to a callable,
+      import that callable and return it, otherwise raise an exception
+      (ImportError or ViewDoesNotExist).
+    """
+    if callable(lookup_view):
+        return lookup_view
 
+    if not isinstance(lookup_view, str):
+        raise ViewDoesNotExist(
+            "'%s' is not a callable or a dot-notation path" % lookup_view
+        )
 
-class EngineHandler:
-    def __init__(self, templates=None):
-        """
-        templates is an optional list of template engine definitions
-        (structured like settings.TEMPLATES).
-        """
-        self._templates = templates
-        self._engines = {}
+    mod_name, func_name = get_mod_func(lookup_view)
+    if not func_name:  # No '.' in lookup_view
+        raise ImportError(
+            "Could not import '%s'. The path must be fully qualified." % lookup_view
+        )
 
-    @cached_property
-    def templates(self):
-        if self._templates is None:
-            self._templates = settings.TEMPLATES
-
-        templates = {}
-        backend_names = []
-        for tpl in self._templates:
-            try:
-                # This will raise an exception if 'BACKEND' doesn't exist or
-                # isn't a string containing at least one dot.
-                default_name = tpl["BACKEND"].rsplit(".", 2)[-2]
-            except Exception:
-                invalid_backend = tpl.get("BACKEND", "<not defined>")
-                raise ImproperlyConfigured(
-                    "Invalid BACKEND for a template engine: {}. Check "
-                    "your TEMPLATES setting.".format(invalid_backend)
-                )
-
-            tpl = {
-                "NAME": default_name,
-                "DIRS": [],
-                "APP_DIRS": False,
-                "OPTIONS": {},
-                **tpl,
-            }
-
-            templates[tpl["NAME"]] = tpl
-            backend_names.append(tpl["NAME"])
-
-        counts = Counter(backend_names)
-        duplicates = [alias for alias, count in counts.most_common() if count > 1]
-        if duplicates:
-            raise ImproperlyConfigured(
-                "Template engine aliases aren't unique, duplicates: {}. "
-                "Set a unique NAME for each engine in settings.TEMPLATES.".format(
-                    ", ".join(duplicates)
-                )
+    try:
+        mod = import_module(mod_name)
+    except ImportError:
+        parentmod, submod = get_mod_func(mod_name)
+        if submod and not module_has_submodule(import_module(parentmod), submod):
+            raise ViewDoesNotExist(
+                "Could not import '%s'. Parent module %s does not exist."
+                % (lookup_view, mod_name)
             )
-
-        return templates
-
-    def __getitem__(self, alias):
+        else:
+            raise
+    else:
         try:
-            return self._engines[alias]
-        except KeyError:
-            try:
-                params = self.templates[alias]
-            except KeyError:
-                raise InvalidTemplateEngineError(
-                    "Could not find config for '{}' "
-                    "in settings.TEMPLATES".format(alias)
+            view_func = getattr(mod, func_name)
+        except AttributeError:
+            raise ViewDoesNotExist(
+                "Could not import '%s'. View does not exist in module %s."
+                % (lookup_view, mod_name)
+            )
+        else:
+            if not callable(view_func):
+                raise ViewDoesNotExist(
+                    "Could not import '%s.%s'. View is not callable."
+                    % (mod_name, func_name)
                 )
-
-            # If importing or initializing the backend raises an exception,
-            # self._engines[alias] isn't set and this code may get executed
-            # again, so we must preserve the original params. See #24265.
-            params = params.copy()
-            backend = params.pop("BACKEND")
-            engine_cls = import_string(backend)
-            engine = engine_cls(params)
-
-            self._engines[alias] = engine
-            return engine
-
-    def __iter__(self):
-        return iter(self.templates)
-
-    def all(self):
-        return [self[alias] for alias in self]
+            return view_func
 
 
-@functools.lru_cache
-def get_app_template_dirs(dirname):
-    """
-    Return an iterable of paths of directories to load app templates from.
-
-    dirname is the name of the subdirectory containing templates inside
-    installed applications.
-    """
-    template_dirs = [
-        Path(app_config.path) / dirname
-        for app_config in apps.get_app_configs()
-        if app_config.path and (Path(app_config.path) / dirname).is_dir()
-    ]
-    # Immutable return value because it will be cached and shared by callers.
-    return tuple(template_dirs)
+def get_mod_func(callback):
+    # Convert 'django.views.news.stories.story_detail' to
+    # ['django.views.news.stories', 'story_detail']
+    try:
+        dot = callback.rindex(".")
+    except ValueError:
+        return callback, ""
+    return callback[:dot], callback[dot + 1 :]
